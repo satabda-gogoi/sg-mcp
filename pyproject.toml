@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sg-mcp"
+version = "0.1.0"
+description = "Cloud-ready Streamable HTTP MCP server featuring Gemini 3.8 Flash TTS voice generation and multi-key failover."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=4.2.6",
+    "google-genai>=3.6.1",
+    "python-dotenv>=1.2.4",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28.0",
+    "pytest>=9.2.0",
+]
+
+[project.scripts]
+sg-mcp = "sg_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sg_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

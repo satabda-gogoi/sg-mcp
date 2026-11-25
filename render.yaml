@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: sg-mcp
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: GEMINI_TTS_MODEL
+        value: gemini-3.8-flash-tts
+      - key: DEFAULT_VOICE_ID
+        value: charon
+      - key: AUDIO_STORAGE_DIR
+        value: /tmp/sg-mcp-audio
+      - key: AUDIO_TTL_SECONDS
+        value: "3600"
+      - key: INCLUDE_INLINE_AUDIO
+        value: "true"
+      - key: MCP_AUTH_TOKEN
+        sync: false
