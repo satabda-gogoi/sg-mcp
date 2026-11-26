@@ -276,6 +276,7 @@ class YouTubeService:
             raise ValueError("privacy_status must be 'private', 'unlisted', or 'public'.")
 
         temp_files: list[Path] = []
+        media_uploads: list[MediaFileUpload] = []
         try:
             source_str = (video_source or "").strip()
             b64_str = (video_base64 or "").strip()
@@ -340,6 +341,7 @@ class YouTubeService:
                 chunksize=8 * 1024 * 1024,
                 resumable=True,
             )
+            media_uploads.append(media)
 
             youtube = self._get_client()
             insert_req = youtube.videos().insert(
@@ -365,11 +367,13 @@ class YouTubeService:
                     if not thumb_path.is_file():
                         raise FileNotFoundError(f"Thumbnail file not found: {thumb_path}")
                 thumb_mime, _ = mimetypes.guess_type(str(thumb_path))
+                thumb_media = MediaFileUpload(
+                    str(thumb_path), mimetype=thumb_mime or "image/jpeg"
+                )
+                media_uploads.append(thumb_media)
                 youtube.thumbnails().set(
                     videoId=video_id,
-                    media_body=MediaFileUpload(
-                        str(thumb_path), mimetype=thumb_mime or "image/jpeg"
-                    ),
+                    media_body=thumb_media,
                 ).execute()
                 thumbnail_uploaded = True
 
@@ -391,8 +395,18 @@ class YouTubeService:
                 "studio_url": f"https://studio.youtube.com/video/{video_id}/edit",
             }
         finally:
+            for upload in media_uploads:
+                try:
+                    stream = upload.stream()
+                    if stream is not None:
+                        stream.close()
+                except Exception:
+                    pass
             for tmp in temp_files:
-                tmp.unlink(missing_ok=True)
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def get_stats(
         self,
