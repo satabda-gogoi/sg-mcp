@@ -1,8 +1,9 @@
-"""FastMCP Streamable HTTP server for Gemini 3.8 Flash TTS and future tools."""
+"""FastMCP Streamable HTTP server for Gemini 3.8 Flash TTS and YouTube Data API v3 tools."""
 
 from __future__ import annotations
 
 import hmac
+import html
 import json
 import logging
 from typing import Annotated, Any, Literal
@@ -18,13 +19,14 @@ from pydantic import Field
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sg_mcp import __version__
 from sg_mcp.config import Settings
 from sg_mcp.storage import AudioStorage
 from sg_mcp.tts_service import GeminiTTSService
+from sg_mcp.youtube_service import YouTubeService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,36 +61,50 @@ class OptionalBearerAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+def _base_url_from_request(request: Request, settings: Settings) -> str:
+    if settings.public_base_url:
+        return settings.public_base_url
+
+    proto = (
+        request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        or request.url.scheme
+        or "https"
+    )
+    host = (
+        request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+        or request.headers.get("host", "").strip()
+        or request.url.netloc
+    )
+    if host:
+        return f"{proto}://{host}".rstrip("/")
+    return f"http://127.0.0.1:{settings.port}"
+
+
 def _resolve_base_url(settings: Settings) -> str:
     if settings.public_base_url:
         return settings.public_base_url
 
     try:
-        request = get_http_request()
-        proto = (
-            request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
-            or request.url.scheme
-            or "https"
-        )
-        host = (
-            request.headers.get("x-forwarded-host", "").split(",")[0].strip()
-            or request.headers.get("host", "").strip()
-            or request.url.netloc
-        )
-        if host:
-            return f"{proto}://{host}".rstrip("/")
+        return _base_url_from_request(get_http_request(), settings)
     except RuntimeError:
         pass
 
     return f"http://127.0.0.1:{settings.port}"
 
 
+def _youtube_redirect_uri(request: Request, settings: Settings) -> str:
+    if settings.youtube_redirect_uri:
+        return settings.youtube_redirect_uri
+    return f"{_base_url_from_request(request, settings)}/youtube/callback"
+
+
 def build_mcp_server(
     settings: Settings | None = None,
     tts_service: GeminiTTSService | None = None,
     storage: AudioStorage | None = None,
-) -> tuple[FastMCP, Settings, GeminiTTSService, AudioStorage]:
-    """Build and configure the FastMCP server and its tools/routes."""
+    youtube_service: YouTubeService | None = None,
+) -> tuple[FastMCP, Settings, GeminiTTSService, AudioStorage, YouTubeService]:
+    """Build and configure the FastMCP server, tools, and HTTP routes."""
     cfg = settings or Settings.from_env()
     tts = tts_service or GeminiTTSService(cfg)
     store = storage or AudioStorage(
@@ -96,17 +112,21 @@ def build_mcp_server(
         ttl_seconds=cfg.audio_ttl_seconds,
         max_files=cfg.max_stored_files,
     )
+    yt = youtube_service or YouTubeService(cfg)
 
     mcp = FastMCP(
         name="sg-mcp",
         version=__version__,
         instructions=(
-            "Cloud MCP server providing expressive text-to-speech generation via "
-            "gemini-3.8-flash-tts. Call `list_voices` if the user wants to browse or pick "
-            "male, female, or neutral voices. Call `generate_voice` with `script` and "
-            "optional `voice` (defaults to male voice 'charon' if omitted) plus optional "
-            "style/language/temperature settings. Always share the returned downloadable "
-            "audio URL with the user."
+            "Cloud MCP server providing expressive text-to-speech via gemini-3.8-flash-tts "
+            "and YouTube channel management via YouTube Data API v3.\n"
+            "- TTS: Call `list_voices` to browse male/female/neutral voices, or `generate_voice` "
+            "(defaults to male voice 'charon' if `voice` is omitted) and share the returned "
+            "downloadable WAV URL.\n"
+            "- YouTube: Call `upload_youtube_video` (supports Shorts & long videos from a local "
+            "path or HTTP/HTTPS URL; defaults to 'private' privacy_status unless requested "
+            "otherwise), `get_youtube_stats` (channel + recent video views/likes/comments or "
+            "specific video stats), and `get_youtube_comments` (top-level comments + replies)."
         ),
     )
 
@@ -284,6 +304,174 @@ def build_mcp_server(
             structured_content=metadata,
         )
 
+    @mcp.tool(
+        name="upload_youtube_video",
+        description=(
+            "Upload a YouTube Short or standard long-form video to the connected YouTube "
+            "channel from a local file path or public HTTP/HTTPS video URL. Supports title, "
+            "description, tags, privacy status ('private', 'unlisted', 'public'), scheduled "
+            "publish_at, and optional custom thumbnail."
+        ),
+    )
+    async def upload_youtube_video(
+        video_source: Annotated[
+            str,
+            Field(description="Local file path or direct HTTP/HTTPS URL of the video (.mp4, .mov, etc.)."),
+        ],
+        title: Annotated[
+            str,
+            Field(description="Video title (max 100 chars)."),
+        ],
+        description: Annotated[
+            str,
+            Field(description="Video description (max 5000 chars)."),
+        ] = "",
+        video_type: Annotated[
+            Literal["short", "long"],
+            Field(
+                description=(
+                    "'short' for vertical/square YouTube Shorts (<=3 min; adds #Shorts tag) "
+                    "or 'long' for regular horizontal videos."
+                )
+            ),
+        ] = "long",
+        privacy_status: Annotated[
+            Literal["private", "unlisted", "public"],
+            Field(description="YouTube visibility: 'private' (default), 'unlisted', or 'public'."),
+        ] = "private",
+        tags: Annotated[
+            list[str] | None,
+            Field(description="Optional list of keyword tags."),
+        ] = None,
+        category_id: Annotated[
+            str,
+            Field(description="YouTube category ID (default '22' = People & Blogs; '28' = Science & Tech)."),
+        ] = "22",
+        made_for_kids: Annotated[
+            bool,
+            Field(description="Whether the video is made for kids (COPPA)."),
+        ] = False,
+        publish_at: Annotated[
+            str | None,
+            Field(description="Optional ISO-8601 UTC timestamp for scheduled publishing (e.g. '2026-12-01T15:00:00Z')."),
+        ] = None,
+        default_language: Annotated[
+            str | None,
+            Field(description="Optional BCP-47 language code of video title/description (e.g. 'en')."),
+        ] = None,
+        thumbnail_source: Annotated[
+            str | None,
+            Field(description="Optional local path or HTTP/HTTPS URL of a custom thumbnail image."),
+        ] = None,
+    ) -> ToolResult:
+        """Upload a Short or long video to YouTube and return its URL and metadata."""
+        result = await anyio.to_thread.run_sync(
+            lambda: yt.upload_video(
+                video_source=video_source,
+                title=title,
+                description=description,
+                video_type=video_type,
+                privacy_status=privacy_status,
+                tags=tags,
+                category_id=category_id,
+                made_for_kids=made_for_kids,
+                publish_at=publish_at,
+                default_language=default_language,
+                thumbnail_source=thumbnail_source,
+            )
+        )
+
+        primary_url = result.get("shorts_url") or result["watch_url"]
+        summary = (
+            f"Uploaded YouTube {result['video_type']} video!\n"
+            f"- Title: {result['title']}\n"
+            f"- Video ID: `{result['video_id']}` | Privacy: `{result['privacy_status']}`\n"
+            f"- Watch URL: {primary_url}\n"
+            f"- YouTube Studio: {result['studio_url']}"
+        )
+        return ToolResult(
+            content=[TextContent(type="text", text=summary)],
+            structured_content=result,
+        )
+
+    @mcp.tool(
+        name="get_youtube_stats",
+        description=(
+            "Read YouTube statistics: if `video_id` (or YouTube URL) is provided, returns "
+            "that video's views, total likes, total comments, duration, and privacy status. "
+            "If `video_id` is omitted, returns the connected channel's subscriber count, "
+            "total views, total videos, and recent uploaded videos with their stats."
+        ),
+    )
+    async def get_youtube_stats(
+        video_id: Annotated[
+            str | None,
+            Field(description="Optional YouTube video ID or URL. Omit to inspect channel & recent videos."),
+        ] = None,
+        max_videos: Annotated[
+            int,
+            Field(description="Maximum recent videos to include when querying channel stats (1-50).", ge=1, le=50),
+        ] = 10,
+    ) -> ToolResult:
+        """Fetch video or channel statistics from YouTube Data API v3."""
+        result = await anyio.to_thread.run_sync(
+            lambda: yt.get_stats(video_id=video_id, max_videos=max_videos)
+        )
+        return ToolResult(
+            content=[TextContent(type="text", text=json.dumps(result, indent=2))],
+            structured_content=result,
+        )
+
+    @mcp.tool(
+        name="get_youtube_comments",
+        description=(
+            "Read comments and replies on a YouTube video (or across the connected channel "
+            "if `video_id` is omitted). Supports sorting by relevance/time and fetching "
+            "all comment threads."
+        ),
+    )
+    async def get_youtube_comments(
+        video_id: Annotated[
+            str | None,
+            Field(description="Optional YouTube video ID or URL. Omit to list recent comments across the channel."),
+        ] = None,
+        max_results: Annotated[
+            int,
+            Field(description="Comment threads per page (1-100) when fetch_all is false.", ge=1, le=100),
+        ] = 50,
+        order: Annotated[
+            Literal["relevance", "time"],
+            Field(description="Sort order: 'relevance' or 'time' (newest first)."),
+        ] = "relevance",
+        include_replies: Annotated[
+            bool,
+            Field(description="Include nested comment replies."),
+        ] = True,
+        page_token: Annotated[
+            str | None,
+            Field(description="Optional pagination token from a previous call."),
+        ] = None,
+        fetch_all: Annotated[
+            bool,
+            Field(description="If true, paginate automatically to fetch up to 500 comment threads."),
+        ] = False,
+    ) -> ToolResult:
+        """Fetch top-level comments and replies from YouTube."""
+        result = await anyio.to_thread.run_sync(
+            lambda: yt.get_comments(
+                video_id=video_id,
+                max_results=max_results,
+                order=order,
+                include_replies=include_replies,
+                page_token=page_token,
+                fetch_all=fetch_all,
+            )
+        )
+        return ToolResult(
+            content=[TextContent(type="text", text=json.dumps(result, indent=2))],
+            structured_content=result,
+        )
+
     @mcp.custom_route("/", methods=["GET"])
     async def root_info(request: Request) -> JSONResponse:
         return JSONResponse(
@@ -296,7 +484,16 @@ def build_mcp_server(
                 "tts_model": cfg.tts_model,
                 "default_voice": cfg.default_voice_id,
                 "api_keys_configured": len(cfg.api_keys),
-                "tools": ["generate_voice", "list_voices"],
+                "youtube_oauth_client_configured": yt.has_oauth_client(),
+                "youtube_authenticated": yt.is_authenticated(),
+                "youtube_auth_url": f"{_base_url_from_request(request, cfg)}/youtube/auth",
+                "tools": [
+                    "generate_voice",
+                    "list_voices",
+                    "upload_youtube_video",
+                    "get_youtube_stats",
+                    "get_youtube_comments",
+                ],
             }
         )
 
@@ -328,19 +525,78 @@ def build_mcp_server(
             },
         )
 
-    return mcp, cfg, tts, store
+    @mcp.custom_route("/youtube/auth", methods=["GET"])
+    async def youtube_auth_start(request: Request) -> Response:
+        if not yt.has_oauth_client():
+            return JSONResponse(
+                {
+                    "error": "YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET are not configured."
+                },
+                status_code=500,
+            )
+        redirect_uri = _youtube_redirect_uri(request, cfg)
+        auth_url, _ = yt.create_auth_url(redirect_uri)
+        return RedirectResponse(url=auth_url, status_code=302)
+
+    @mcp.custom_route("/youtube/callback", methods=["GET"])
+    async def youtube_auth_callback(request: Request) -> Response:
+        error = request.query_params.get("error")
+        if error:
+            return HTMLResponse(
+                f"<h2>YouTube OAuth Failed</h2><p>{html.escape(error)}</p>",
+                status_code=400,
+            )
+
+        code = request.query_params.get("code", "").strip()
+        if not code:
+            return HTMLResponse(
+                "<h2>Missing OAuth authorization code.</h2>",
+                status_code=400,
+            )
+
+        state = request.query_params.get("state")
+        redirect_uri = _youtube_redirect_uri(request, cfg)
+        try:
+            tokens = await anyio.to_thread.run_sync(
+                lambda: yt.exchange_code(code=code, redirect_uri=redirect_uri, state=state)
+            )
+        except Exception as exc:
+            logger.exception("YouTube OAuth callback failed")
+            return HTMLResponse(
+                f"<h2>Token exchange failed</h2><pre>{html.escape(str(exc))}</pre>",
+                status_code=500,
+            )
+
+        refresh_token = html.escape(tokens.get("refresh_token") or "(none returned)")
+        token_file = html.escape(tokens.get("token_file") or "")
+        body = f"""<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>sg-mcp YouTube Connected</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;">
+  <h2>YouTube Channel Connected Successfully</h2>
+  <p>Token saved locally to: <code>{token_file}</code></p>
+  <p>For cloud deployments (Render / Google Cloud Run), copy this environment variable:</p>
+  <pre style="background:#111;color:#0f0;padding:12px;border-radius:8px;overflow:auto;">YOUTUBE_REFRESH_TOKEN={refresh_token}</pre>
+  <p>You can close this tab now.</p>
+</body>
+</html>"""
+        return HTMLResponse(body, status_code=200)
+
+    return mcp, cfg, tts, store, yt
 
 
 def create_app(
     settings: Settings | None = None,
     tts_service: GeminiTTSService | None = None,
     storage: AudioStorage | None = None,
+    youtube_service: YouTubeService | None = None,
 ) -> Any:
-    """Create the production ASGI application exposing Streamable HTTP MCP + download routes."""
-    mcp, cfg, _, _ = build_mcp_server(
+    """Create the production ASGI application exposing Streamable HTTP MCP + routes."""
+    mcp, cfg, _, _, _ = build_mcp_server(
         settings=settings,
         tts_service=tts_service,
         storage=storage,
+        youtube_service=youtube_service,
     )
 
     middlewares: list[Middleware] = [

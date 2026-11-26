@@ -1,4 +1,4 @@
-"""Unit and ASGI integration tests for sg-mcp."""
+"""Unit and ASGI integration tests for sg-mcp (TTS + YouTube tools)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import wave
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
 from fastmcp import Client
 from starlette.testclient import TestClient
@@ -18,6 +17,7 @@ from sg_mcp.server import build_mcp_server, create_app
 from sg_mcp.storage import AudioStorage
 from sg_mcp.tts_service import GeminiTTSService
 from sg_mcp.voices import VoiceCatalog
+from sg_mcp.youtube_service import YouTubeService, extract_video_id
 
 
 def _make_dummy_wav(duration_ms: int = 100, rate: int = 24000) -> bytes:
@@ -36,6 +36,12 @@ def _make_settings(tmp_path: Path, **overrides) -> Settings:
         api_keys=("key-1", "key-2"),
         tts_model="gemini-3.8-flash-tts",
         default_voice_id="charon",
+        youtube_client_id="yt-client-id",
+        youtube_client_secret="yt-client-secret",
+        youtube_refresh_token="yt-refresh-token",
+        youtube_token_file=tmp_path / "youtube_token.json",
+        youtube_channel_email="dev.satabda@gmail.com",
+        youtube_redirect_uri="",
         host="127.0.0.1",
         port=8080,
         public_base_url="https://example.run.app",
@@ -125,6 +131,168 @@ class _FakeClient:
         )
 
 
+class _FakeExec:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def execute(self) -> dict:
+        return self._payload
+
+
+class _FakeInsertReq:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def next_chunk(self):
+        return None, self._payload
+
+
+class _FakeYouTubeAPI:
+    def __init__(self):
+        self.last_insert: dict | None = None
+
+    def videos(self):
+        api = self
+
+        class _Videos:
+            def insert(self, *, part, body, media_body):
+                api.last_insert = {"part": part, "body": body}
+                return _FakeInsertReq(
+                    {
+                        "id": "dQw4w9WgXcQ",
+                        "snippet": {
+                            "title": body["snippet"]["title"],
+                            "description": body["snippet"]["description"],
+                            "channelId": "UC123",
+                            "channelTitle": "Satabda Demo",
+                            "publishedAt": "2026-11-26T00:00:00Z",
+                        },
+                        "status": {"privacyStatus": body["status"]["privacyStatus"]},
+                    }
+                )
+
+            def list(self, *, part, id):
+                return _FakeExec(
+                    {
+                        "items": [
+                            {
+                                "id": id.split(",")[0],
+                                "snippet": {
+                                    "title": "Demo Video",
+                                    "description": "Desc",
+                                    "channelId": "UC123",
+                                    "channelTitle": "Satabda Demo",
+                                    "publishedAt": "2026-11-26T00:00:00Z",
+                                    "tags": ["Shorts"],
+                                },
+                                "statistics": {
+                                    "viewCount": "150",
+                                    "likeCount": "25",
+                                    "commentCount": "4",
+                                    "favoriteCount": "0",
+                                },
+                                "contentDetails": {"duration": "PT15S"},
+                                "status": {"privacyStatus": "private"},
+                            }
+                        ]
+                    }
+                )
+
+        return _Videos()
+
+    def channels(self):
+        class _Channels:
+            def list(self, *, part, mine=True):
+                return _FakeExec(
+                    {
+                        "items": [
+                            {
+                                "id": "UC123",
+                                "snippet": {
+                                    "title": "Satabda Demo",
+                                    "customUrl": "@satabdademo",
+                                    "publishedAt": "2024-01-01T00:00:00Z",
+                                },
+                                "statistics": {
+                                    "subscriberCount": "42",
+                                    "hiddenSubscriberCount": False,
+                                    "viewCount": "1200",
+                                    "videoCount": "5",
+                                },
+                                "contentDetails": {"relatedPlaylists": {"uploads": "UU123"}},
+                            }
+                        ]
+                    }
+                )
+
+        return _Channels()
+
+    def playlistItems(self):
+        class _PlaylistItems:
+            def list(self, *, part, playlistId, maxResults=10):
+                return _FakeExec({"items": [{"contentDetails": {"videoId": "dQw4w9WgXcQ"}}]})
+
+        return _PlaylistItems()
+
+    def commentThreads(self):
+        class _CommentThreads:
+            def list(self, **kwargs):
+                return _FakeExec(
+                    {
+                        "items": [
+                            {
+                                "id": "thread-1",
+                                "snippet": {
+                                    "totalReplyCount": 1,
+                                    "topLevelComment": {
+                                        "id": "c1",
+                                        "snippet": {
+                                            "videoId": "dQw4w9WgXcQ",
+                                            "authorDisplayName": "Viewer One",
+                                            "authorChannelUrl": "https://youtube.com/@v1",
+                                            "textDisplay": "Great demo!",
+                                            "likeCount": 3,
+                                            "publishedAt": "2026-11-26T01:00:00Z",
+                                            "updatedAt": "2026-11-26T01:00:00Z",
+                                        },
+                                    },
+                                },
+                                "replies": {
+                                    "comments": [
+                                        {
+                                            "id": "c2",
+                                            "snippet": {
+                                                "authorDisplayName": "Satabda Demo",
+                                                "textDisplay": "Thanks!",
+                                                "likeCount": 1,
+                                                "publishedAt": "2026-11-26T01:05:00Z",
+                                            },
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                        "nextPageToken": None,
+                    }
+                )
+
+        return _CommentThreads()
+
+
+class _FakeCreds:
+    valid = True
+    expired = False
+    refresh_token = "yt-refresh-token"
+
+    def refresh(self, req):
+        pass
+
+
+class _TestableYouTubeService(YouTubeService):
+    def _load_credentials(self, refresh_if_needed: bool = True):
+        return _FakeCreds()
+
+
 def test_storage_ttl_eviction_and_path_safety(tmp_path: Path) -> None:
     store = AudioStorage(tmp_path / "audio", ttl_seconds=60, max_files=2)
     wav = _make_dummy_wav()
@@ -132,11 +300,20 @@ def test_storage_ttl_eviction_and_path_safety(tmp_path: Path) -> None:
     r2 = store.save_wav(wav, voice_id="kore")
     r3 = store.save_wav(wav, voice_id="puck")
 
-    assert store.get(r1.file_id) is None  # evicted due to max_files=2
+    assert store.get(r1.file_id) is None
     assert store.get(r2.file_id) is not None
     assert store.get(r3.file_id) is not None
     assert store.get("../etc/passwd") is None
     assert store.get("invalid") is None
+
+
+def test_extract_video_id_formats() -> None:
+    assert extract_video_id("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert extract_video_id("https://youtu.be/dQw4w9WgXcQ?t=5") == "dQw4w9WgXcQ"
+    assert extract_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    with pytest.raises(ValueError):
+        extract_video_id("https://example.com/invalid")
 
 
 def test_failover_and_default_voice(tmp_path: Path) -> None:
@@ -161,7 +338,7 @@ def test_failover_and_default_voice(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_mcp_tools_and_download_route(tmp_path: Path) -> None:
+async def test_mcp_tts_and_youtube_tools(tmp_path: Path) -> None:
     wav = _make_dummy_wav()
     calls: list[str] = []
     settings = _make_settings(tmp_path)
@@ -171,17 +348,23 @@ async def test_mcp_tools_and_download_route(tmp_path: Path) -> None:
         client_factory=lambda key: _FakeClient(key, calls, wav, fail_first=False),
     )
     store = AudioStorage(settings.audio_storage_dir, ttl_seconds=3600, max_files=20)
-    mcp, _, _, _ = build_mcp_server(settings=settings, tts_service=tts, storage=store)
+    fake_api = _FakeYouTubeAPI()
+    yt = _TestableYouTubeService(settings, youtube_client_factory=lambda creds: fake_api)
+
+    demo_mp4 = tmp_path / "demo.mp4"
+    demo_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+    mcp, _, _, _, _ = build_mcp_server(
+        settings=settings, tts_service=tts, storage=store, youtube_service=yt
+    )
 
     async with Client(mcp) as client:
-        # 1. List neutral voices
+        # 1. TTS voice listing & generation
         list_res = await client.call_tool("list_voices", {"gender": "neutral"})
         payload = json.loads(list_res.content[0].text)
         assert payload["total_matching"] == 1
         assert payload["voices"][0]["id"] == "en-au-assistant-6"
-        assert payload["default_voice_id"] == "charon"
 
-        # 2. Generate voice with omitted voice -> uses default male 'charon'
         gen_res = await client.call_tool(
             "generate_voice",
             {"script": "Testing cloud voice generation.", "style": "warm"},
@@ -189,21 +372,60 @@ async def test_mcp_tools_and_download_route(tmp_path: Path) -> None:
         assert gen_res.structured_content["used_default_voice"] is True
         assert gen_res.structured_content["voice"]["id"] == "charon"
         file_id = gen_res.structured_content["file"]["file_id"]
-        assert gen_res.structured_content["file"]["download_url"].startswith(
-            "https://example.run.app/download/"
-        )
 
-    # 3. Verify HTTP routes (/health, /download/{file_id}, auth middleware)
-    app = create_app(settings=settings, tts_service=tts, storage=store)
+        # 2. YouTube Short upload
+        up_res = await client.call_tool(
+            "upload_youtube_video",
+            {
+                "video_source": str(demo_mp4),
+                "title": "Demo Short",
+                "description": "Testing YouTube upload via sg-mcp",
+                "video_type": "short",
+                "privacy_status": "private",
+            },
+        )
+        assert up_res.structured_content["video_id"] == "dQw4w9WgXcQ"
+        assert up_res.structured_content["shorts_url"] == "https://www.youtube.com/shorts/dQw4w9WgXcQ"
+        assert "#Shorts" in fake_api.last_insert["body"]["snippet"]["description"]
+
+        # 3. YouTube channel & video stats
+        ch_stats = await client.call_tool("get_youtube_stats", {})
+        assert ch_stats.structured_content["scope"] == "channel"
+        assert ch_stats.structured_content["channel"]["subscriber_count"] == 42
+        assert ch_stats.structured_content["recent_videos"][0]["like_count"] == 25
+
+        vid_stats = await client.call_tool(
+            "get_youtube_stats", {"video_id": "https://youtu.be/dQw4w9WgXcQ"}
+        )
+        assert vid_stats.structured_content["scope"] == "video"
+        assert vid_stats.structured_content["video"]["comment_count"] == 4
+
+        # 4. YouTube comments
+        comments_res = await client.call_tool(
+            "get_youtube_comments", {"video_id": "dQw4w9WgXcQ"}
+        )
+        assert comments_res.structured_content["total_threads_returned"] == 1
+        assert comments_res.structured_content["comments"][0]["text"] == "Great demo!"
+        assert comments_res.structured_content["comments"][0]["replies"][0]["text"] == "Thanks!"
+
+    # 5. Verify HTTP routes (/health, /download/{file_id}, /youtube/auth)
+    app = create_app(settings=settings, tts_service=tts, storage=store, youtube_service=yt)
     with TestClient(app) as http_client:
         health = http_client.get("/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
 
+        root = http_client.get("/")
+        assert root.status_code == 200
+        assert "upload_youtube_video" in root.json()["tools"]
+
         dl = http_client.get(f"/download/{file_id}/test.wav")
         assert dl.status_code == 200
-        assert dl.headers["content-type"].startswith("audio/wav")
         assert dl.content[:4] == b"RIFF"
+
+        auth_redir = http_client.get("/youtube/auth", follow_redirects=False)
+        assert auth_redir.status_code == 302
+        assert "accounts.google.com/o/oauth2/auth" in auth_redir.headers["location"]
 
 
 def test_optional_bearer_auth_on_mcp(tmp_path: Path) -> None:

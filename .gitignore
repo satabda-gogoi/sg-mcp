@@ -13,11 +13,18 @@ venv/
 .env
 .env.*
 !.env.example
+youtube_token.json
+client_secret*.json
+client_secrets*.json
 
-# Generated runtime audio files
+# Generated runtime media files
 generated_audio/
+demo_media/
 *.wav
 *.mp3
+*.mp4
+*.mov
+*.webm
 
 # Tests & caches
 .pytest_cache/

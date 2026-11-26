@@ -42,6 +42,12 @@ class Settings:
     api_keys: tuple[str, ...]
     tts_model: str
     default_voice_id: str
+    youtube_client_id: str
+    youtube_client_secret: str
+    youtube_refresh_token: str
+    youtube_token_file: Path
+    youtube_channel_email: str
+    youtube_redirect_uri: str
     host: str
     port: int
     public_base_url: str
@@ -59,6 +65,15 @@ class Settings:
             tts_model=os.getenv("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts").strip()
             or "gemini-3.8-flash-tts",
             default_voice_id=os.getenv("DEFAULT_VOICE_ID", "charon").strip().lower() or "charon",
+            youtube_client_id=os.getenv("YOUTUBE_CLIENT_ID", "").strip(),
+            youtube_client_secret=os.getenv("YOUTUBE_CLIENT_SECRET", "").strip(),
+            youtube_refresh_token=os.getenv("YOUTUBE_REFRESH_TOKEN", "").strip(),
+            youtube_token_file=Path(
+                os.getenv("YOUTUBE_TOKEN_FILE", "./youtube_token.json").strip()
+                or "./youtube_token.json"
+            ),
+            youtube_channel_email=os.getenv("YOUTUBE_CHANNEL_EMAIL", "").strip(),
+            youtube_redirect_uri=os.getenv("YOUTUBE_REDIRECT_URI", "").strip(),
             host=os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=int(os.getenv("PORT", "8080")),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),

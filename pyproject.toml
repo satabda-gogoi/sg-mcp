@@ -4,20 +4,22 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sg-mcp"
-version = "0.1.0"
-description = "Cloud-ready Streamable HTTP MCP server featuring Gemini 3.8 Flash TTS voice generation and multi-key failover."
+version = "0.2.0"
+description = "Cloud-ready Streamable HTTP MCP server featuring Gemini 3.8 Flash TTS and YouTube Data API v3 upload/stats/comments tools."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=4.2.6",
+    "google-api-python-client>=2.202.0",
+    "google-auth-oauthlib>=1.5.0",
     "google-genai>=3.6.1",
+    "httpx>=0.28.0",
     "python-dotenv>=1.2.4",
     "uvicorn[standard]>=0.54.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "httpx>=0.28.0",
     "pytest>=9.2.0",
 ]
 

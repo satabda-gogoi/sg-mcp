@@ -1,42 +1,21 @@
-# sg-mcp — Cloud Gemini 3.8 Flash TTS MCP Server
+# sg-mcp — Cloud Gemini 3.8 Flash TTS & YouTube MCP Server
 
-A cloud-ready **Model Context Protocol (MCP)** server built with **FastMCP 4 (`streamable-http`)** and the official **Google GenAI SDK (`google-genai`)**. It exposes expressive text-to-speech tools powered by **`gemini-3.8-flash-tts`** with automatic multi-API-key failover, full voice discovery (**2,150+ male, female, and neutral voices**), and direct **downloadable `.wav` links** designed for **Gemini Business / Gemini Enterprise custom connections** and modern MCP clients.
+A cloud-ready **Model Context Protocol (MCP)** server built with **FastMCP 4 (`streamable-http`)**, **Google GenAI SDK (`google-genai`)**, and **YouTube Data API v3 (`google-api-python-client`)**. It powers expressive voice generation via **`gemini-3.8-flash-tts`** and full YouTube upload/analytics tools, built for **Gemini Business / Gemini Enterprise custom connections** and modern MCP clients.
 
 ---
 
 ## Features
 
-- **Streamable HTTP Transport (`/mcp`)**: Stateless HTTP transport compatible with **Gemini Enterprise / Business Custom MCP Connections**, Cursor, Claude Desktop, and FastMCP clients.
-- **`generate_voice` Tool**:
-  - Uses **`gemini-3.8-flash-tts`**.
-  - `voice` is optional — defaults to male voice **`charon`** if omitted.
-  - Supports optional `style` (e.g., `"warm and authoritative"`, `"cheerful and upbeat"`), `language_code` (e.g., `"en-US"`, `"hi-IN"`), `temperature`, `seed`, and `filename_prefix`.
-  - Returns **both** a direct downloadable `.wav` URL (`/download/<id>/<file>.wav`), browser preview URL (`?inline=1`), structured JSON metadata, and inline MCP `AudioContent`.
-- **`list_voices` Tool**:
-  - Fetches and caches all **2,150+ Gemini TTS voices** across `male`, `female`, and `neutral` genders and 29+ languages/accents (with a built-in 30-voice flagship fallback).
-  - Filterable by `gender`, `language_code`, `pitch`, `featured_only`, and keyword `search`.
-- **Automatic Multi-Key Failover**:
-  - Set `GEMINI_API_KEYS=key1,key2` (or `GEMINI_API_KEY` + `GEMINI_API_KEY_2`). If Key 1 hits quota/rate limits or fails, requests automatically fail over to Key 2.
+### 1. Voice Generation (`gemini-3.8-flash-tts`)
+- **`generate_voice`**: Generates `.wav` speech from a script. `voice` is optional (defaults to male voice **`charon`**). Supports optional `style`, `language_code`, `temperature`, `seed`, and `filename_prefix`. Returns a direct downloadable `.wav` URL, browser preview URL (`?inline=1`), structured metadata, and inline MCP `AudioContent`.
+- **`list_voices`**: Searches and filters **2,150+ Gemini TTS voices** across `male`, `female`, and `neutral` genders and 29+ languages (with a 30-voice flagship fallback).
+- **Multi-Key Failover**: `GEMINI_API_KEYS=key1,key2` automatically fails over if Key 1 hits quota or errors.
 
----
-
-## Project Structure
-
-```text
-├── src/sg_mcp/
-│   ├── config.py        # Environment settings & multi-key parsing
-│   ├── voices.py        # 2,150+ voice catalog + flagship fallback + resolution
-│   ├── tts_service.py   # gemini-3.8-flash-tts synthesis & key failover
-│   ├── storage.py       # Ephemeral .wav storage with TTL & max-file eviction
-│   └── server.py        # FastMCP Streamable HTTP app + /health + /download routes
-├── tests/
-│   └── test_server.py   # Unit & HTTP integration tests
-├── Dockerfile
-├── render.yaml
-├── pyproject.toml
-├── requirements.txt
-└── .env.example
-```
+### 2. YouTube Upload, Stats & Comments (YouTube Data API v3)
+- **`upload_youtube_video`**: Uploads **YouTube Shorts** (`video_type="short"`, adds `#Shorts` tag/marker) or **long-form videos** (`video_type="long"`) from a local file path or public HTTP/HTTPS video URL. Supports `privacy_status` (`private`, `unlisted`, `public`), `tags`, `category_id`, `made_for_kids`, scheduled `publish_at`, and optional custom `thumbnail_source`.
+- **`get_youtube_stats`**: Given a `video_id` or YouTube URL, returns views, **total likes**, **total comments**, duration, and privacy status. When `video_id` is omitted, returns channel subscriber count, total views, total videos, and recent videos with their stats.
+- **`get_youtube_comments`**: Reads top-level comments and nested replies for a `video_id`/URL or across the whole channel, with sorting (`relevance`/`time`), pagination, and `fetch_all` mode.
+- **Built-in OAuth Setup Routes**: `/youtube/auth` and `/youtube/callback` let you authorize your YouTube channel in one browser click and obtain `YOUTUBE_REFRESH_TOKEN` for cloud hosting.
 
 ---
 
@@ -47,90 +26,36 @@ A cloud-ready **Model Context Protocol (MCP)** server built with **FastMCP 4 (`s
    uv venv --python 3.12 .venv
    uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
    ```
-   *(Or with standard `pip`: `python -m venv .venv && pip install -r requirements.txt`)*
-
-2. **Configure environment variables**:
+2. **Configure `.env`**:
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` and add your Gemini API keys:
-   ```env
-   GEMINI_API_KEYS=your_primary_key,your_backup_key
-   ```
-   > **Security:** Never commit `.env` or real API keys to GitHub. `.gitignore` already excludes `.env`.
+   Fill in `GEMINI_API_KEYS`, `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, and (after the 1-time OAuth step below) `YOUTUBE_REFRESH_TOKEN`.
+   > **Security:** Never commit `.env` or `youtube_token.json` to GitHub. Both are excluded in `.gitignore`.
 
 3. **Run the server**:
    ```bash
    .venv/Scripts/python.exe -m sg_mcp.server
    ```
-   - Health check: `http://127.0.0.1:8080/health`
+   - Status: `http://127.0.0.1:8080/`
+   - Health: `http://127.0.0.1:8080/health`
    - MCP endpoint: `http://127.0.0.1:8080/mcp`
 
-4. **Run tests**:
-   ```bash
-   .venv/Scripts/pytest.exe -v
-   ```
+4. **One-Time YouTube OAuth Setup**:
+   1. In **Google Cloud Console** -> your project -> **APIs & Services -> Library**, ensure **YouTube Data API v3** is enabled.
+   2. Under **APIs & Services -> Credentials -> your OAuth 2.0 Web Client**, add Authorized redirect URIs:
+      - Local: `http://localhost:8080/youtube/callback`
+      - Cloud (Render): `https://<your-service>.onrender.com/youtube/callback`
+   3. Under **OAuth consent screen -> Test users** (if app is in Testing mode), add your channel email.
+   4. Start the server and open `http://localhost:8080/youtube/auth` (or `https://<your-service>.onrender.com/youtube/auth`) in your browser and approve access.
+   5. Copy the printed `YOUTUBE_REFRESH_TOKEN` into `.env` (for local) and into Render / Cloud Run Environment Variables (for cloud).
 
 ---
 
-## Free Cloud Deployment
+## Will GitHub Commits Reflect Automatically in Render & Gemini MCP?
 
-### Option 1: Google Cloud Run (Recommended — Always Free Tier)
-Google Cloud Run has an **Always Free tier** (2 million requests/month, 360,000 vCPU-seconds, 180,000 GiB-seconds) and is Google's recommended host for **Gemini Enterprise / Business** custom MCP servers.
-
-1. Install [Google Cloud CLI (`gcloud`)](https://cloud.google.com/sdk/docs/install) and authenticate:
-   ```bash
-   gcloud auth login
-   gcloud config set project YOUR_GCP_PROJECT_ID
-   ```
-2. Enable required APIs:
-   ```bash
-   gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
-   ```
-3. Deploy directly from source:
-   ```bash
-   gcloud run deploy sg-mcp \
-     --source . \
-     --region us-central1 \
-     --platform managed \
-     --allow-unauthenticated \
-     --memory 512Mi \
-     --min-instances 0 \
-     --max-instances 2 \
-     --set-env-vars "GEMINI_TTS_MODEL=gemini-3.8-flash-tts,DEFAULT_VOICE_ID=charon,AUDIO_STORAGE_DIR=/tmp/sg-mcp-audio" \
-     --set-env-vars "GEMINI_API_KEYS=KEY_1,KEY_2"
-   ```
-   *(For stricter security, store `GEMINI_API_KEYS` in Google Secret Manager and mount via `--set-secrets`.)*
-4. Copy the service URL printed by Cloud Run (e.g., `https://sg-mcp-xxxxxx-uc.a.run.app`).
-   - Your MCP URL is: `https://sg-mcp-xxxxxx-uc.a.run.app/mcp`
-   - Optional: set `PUBLIC_BASE_URL=https://sg-mcp-xxxxxx-uc.a.run.app` on Cloud Run so download URLs always use your canonical HTTPS domain.
-
----
-
-### Option 2: Render (Free Tier — No Credit Card Required)
-Render offers a **Free Web Service** tier for Docker apps (note: free instances sleep after 15 minutes of inactivity and take ~30–50s to wake on the first request).
-
-1. Push this repo to GitHub (`https://github.com/satabda-gogoi/sg-mcp`).
-2. Log in to [Render](https://render.com), click **New +** -> **Blueprint** (or **Web Service**), and select your GitHub repository (`render.yaml` is already included).
-3. In Render's Environment Variables prompt, enter:
-   - `GEMINI_API_KEYS`: `your_key_1,your_key_2`
-   - *(Optional)* `MCP_AUTH_TOKEN`: a secret bearer token if you want to restrict `/mcp` access.
-4. Click **Apply / Deploy**. Once live, your MCP URL will be:
-   `https://<your-service>.onrender.com/mcp`
-
----
-
-## Connecting to Gemini Business / Gemini Enterprise
-
-1. Open the **Gemini Enterprise / Gemini Business Admin Console** -> **Data Stores / Connections / Custom Connectors**.
-2. Add a **Custom MCP Server** connector:
-   - **Transport**: **Streamable HTTP** (SSE is not supported by Gemini Enterprise).
-   - **MCP Endpoint URL**: `https://<your-deployed-domain>/mcp`
-   - **Authentication**: None (or Bearer Token if you set `MCP_AUTH_TOKEN`).
-3. Refresh/load actions and enable:
-   - `generate_voice`
-   - `list_voices`
-4. Attach the connector to your Gemini Business app/assistant. You can now ask Gemini:
-   - *"List available female voices with a warm tone"*
-   - *"Generate a voice script saying 'Welcome to our Q4 briefing' using the default male voice"*
-   - *"Generate this script in Puck's upbeat voice with an energetic style"*
+- **Render:** **Yes** — if Auto-Deploy is enabled on your Render service (the default when connected to GitHub), pushing to `main` automatically triggers a rebuild and redeploy.
+  - **Important:** When you add *new* environment variables (such as `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, and `YOUTUBE_REFRESH_TOKEN`), you must add them in **Render Dashboard -> Environment -> Save Changes**, because secrets are never committed to GitHub.
+- **Gemini Business / Gemini Enterprise Custom MCP Connection:** **No, not automatically for newly added tools.**
+  - Existing tools keep working, but Gemini Enterprise caches the tool list (`actions`) on the data store and disables new actions by default.
+  - After Render finishes deploying, open **Google Cloud Console -> Gemini Enterprise -> Data stores -> your Custom MCP Server -> Actions tab -> click "Reload custom actions"**, then check and **Enable** the new actions (`upload_youtube_video`, `get_youtube_stats`, `get_youtube_comments`). If a chat session still doesn't see them, toggle the connector off/on and hard-refresh (`Ctrl+F5`).

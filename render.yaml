@@ -11,6 +11,14 @@ services:
         value: gemini-3.8-flash-tts
       - key: DEFAULT_VOICE_ID
         value: charon
+      - key: YOUTUBE_CLIENT_ID
+        sync: false
+      - key: YOUTUBE_CLIENT_SECRET
+        sync: false
+      - key: YOUTUBE_REFRESH_TOKEN
+        sync: false
+      - key: YOUTUBE_CHANNEL_EMAIL
+        sync: false
       - key: AUDIO_STORAGE_DIR
         value: /tmp/sg-mcp-audio
       - key: AUDIO_TTL_SECONDS
