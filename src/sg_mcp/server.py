@@ -308,20 +308,29 @@ def build_mcp_server(
         name="upload_youtube_video",
         description=(
             "Upload a YouTube Short or standard long-form video to the connected YouTube "
-            "channel from a local file path or public HTTP/HTTPS video URL. Supports title, "
-            "description, tags, privacy status ('private', 'unlisted', 'public'), scheduled "
-            "publish_at, and optional custom thumbnail."
+            "channel from a local file path, public HTTP/HTTPS video URL, or base64 video "
+            "payload. Supports title, description, tags, privacy status ('private', "
+            "'unlisted', 'public'), scheduled publish_at, and optional custom thumbnail."
         ),
     )
     async def upload_youtube_video(
-        video_source: Annotated[
-            str,
-            Field(description="Local file path or direct HTTP/HTTPS URL of the video (.mp4, .mov, etc.)."),
-        ],
         title: Annotated[
             str,
             Field(description="Video title (max 100 chars)."),
         ],
+        video_source: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Local file path, direct HTTP/HTTPS URL, or data URI of the video "
+                    "(.mp4, .mov, etc.). Optional if video_base64 is provided."
+                )
+            ),
+        ] = None,
+        video_base64: Annotated[
+            str | None,
+            Field(description="Optional base64-encoded video bytes (useful for remote cloud uploads)."),
+        ] = None,
         description: Annotated[
             str,
             Field(description="Video description (max 5000 chars)."),
@@ -368,6 +377,7 @@ def build_mcp_server(
         result = await anyio.to_thread.run_sync(
             lambda: yt.upload_video(
                 video_source=video_source,
+                video_base64=video_base64,
                 title=title,
                 description=description,
                 video_type=video_type,

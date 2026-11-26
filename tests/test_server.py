@@ -373,7 +373,7 @@ async def test_mcp_tts_and_youtube_tools(tmp_path: Path) -> None:
         assert gen_res.structured_content["voice"]["id"] == "charon"
         file_id = gen_res.structured_content["file"]["file_id"]
 
-        # 2. YouTube Short upload
+        # 2. YouTube Short upload (path + base64)
         up_res = await client.call_tool(
             "upload_youtube_video",
             {
@@ -387,6 +387,18 @@ async def test_mcp_tts_and_youtube_tools(tmp_path: Path) -> None:
         assert up_res.structured_content["video_id"] == "dQw4w9WgXcQ"
         assert up_res.structured_content["shorts_url"] == "https://www.youtube.com/shorts/dQw4w9WgXcQ"
         assert "#Shorts" in fake_api.last_insert["body"]["snippet"]["description"]
+
+        import base64
+        up_b64 = await client.call_tool(
+            "upload_youtube_video",
+            {
+                "video_base64": base64.b64encode(demo_mp4.read_bytes()).decode(),
+                "title": "Demo Base64 Short",
+                "video_type": "short",
+                "privacy_status": "private",
+            },
+        )
+        assert up_b64.structured_content["video_id"] == "dQw4w9WgXcQ"
 
         # 3. YouTube channel & video stats
         ch_stats = await client.call_tool("get_youtube_stats", {})

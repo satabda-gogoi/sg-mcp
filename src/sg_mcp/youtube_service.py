@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import mimetypes
@@ -19,6 +20,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from sg_mcp.config import Settings
@@ -246,7 +248,8 @@ class YouTubeService:
     def upload_video(
         self,
         *,
-        video_source: str,
+        video_source: str | None = None,
+        video_base64: str | None = None,
         title: str,
         description: str = "",
         video_type: str = "long",
@@ -258,7 +261,7 @@ class YouTubeService:
         default_language: str | None = None,
         thumbnail_source: str | None = None,
     ) -> dict[str, Any]:
-        """Upload a video (Long or Short) to YouTube from a local path or HTTP(S) URL."""
+        """Upload a video (Long or Short) from a local path, HTTP(S) URL, or base64 payload."""
         cleaned_title = (title or "").strip()
         if not cleaned_title:
             raise ValueError("Video title cannot be empty.")
@@ -275,16 +278,33 @@ class YouTubeService:
         temp_files: list[Path] = []
         try:
             source_str = (video_source or "").strip()
-            if not source_str:
-                raise ValueError("video_source (local file path or HTTP/HTTPS URL) is required.")
+            b64_str = (video_base64 or "").strip()
+            if source_str.startswith("data:") and ";base64," in source_str and not b64_str:
+                b64_str = source_str.split(";base64,", 1)[1].strip()
+                source_str = ""
 
-            if _is_http_url(source_str):
-                video_path = _download_to_temp_file(source_str, ".mp4")
+            if b64_str:
+                raw_bytes = base64.b64decode(b64_str)
+                if len(raw_bytes) > _MAX_REMOTE_VIDEO_BYTES:
+                    raise ValueError(
+                        f"Base64 video exceeds {_MAX_REMOTE_VIDEO_BYTES // (1024 * 1024)} MiB limit."
+                    )
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                    tmp.write(raw_bytes)
+                    video_path = Path(tmp.name)
                 temp_files.append(video_path)
+            elif source_str:
+                if _is_http_url(source_str):
+                    video_path = _download_to_temp_file(source_str, ".mp4")
+                    temp_files.append(video_path)
+                else:
+                    video_path = Path(source_str).expanduser()
+                    if not video_path.is_file():
+                        raise FileNotFoundError(f"Video file not found: {video_path}")
             else:
-                video_path = Path(source_str).expanduser()
-                if not video_path.is_file():
-                    raise FileNotFoundError(f"Video file not found: {video_path}")
+                raise ValueError(
+                    "Provide either video_source (local file path or HTTP/HTTPS URL) or video_base64."
+                )
 
             cleaned_desc = (description or "").strip()
             cleaned_tags = [t.strip() for t in (tags or []) if t and t.strip()]
@@ -480,11 +500,14 @@ class YouTubeService:
             target_video_id = extract_video_id(video_id)
             list_kwargs["videoId"] = target_video_id
         else:
-            ch_resp = youtube.channels().list(part="id", mine=True).execute()
+            ch_resp = youtube.channels().list(part="id,statistics", mine=True).execute()
             ch_items = ch_resp.get("items") or []
             if not ch_items:
                 raise LookupError("No YouTube channel found for the authenticated account.")
             target_channel_id = ch_items[0]["id"]
+            # YouTube Data API v3 only allows order='time' with allThreadsRelatedToChannelId
+            norm_order = "time"
+            list_kwargs["order"] = norm_order
             list_kwargs["allThreadsRelatedToChannelId"] = target_channel_id
 
         threads: list[dict[str, Any]] = []
@@ -499,7 +522,24 @@ class YouTubeService:
             if next_token:
                 req_kwargs["pageToken"] = next_token
 
-            resp = youtube.commentThreads().list(**req_kwargs).execute()
+            try:
+                resp = youtube.commentThreads().list(**req_kwargs).execute()
+            except HttpError as exc:
+                err_text = str(exc)
+                if exc.resp.status in (400, 403) and (
+                    "commentsDisabled" in err_text or target_channel_id is not None
+                ):
+                    return {
+                        "video_id": target_video_id,
+                        "channel_id": target_channel_id,
+                        "order": norm_order,
+                        "total_threads_returned": 0,
+                        "next_page_token": None,
+                        "comments": [],
+                        "note": "No accessible comment threads found (comments may be disabled or channel has no comments yet).",
+                    }
+                raise
+
             for item in resp.get("items") or []:
                 threads.append(self._format_comment_thread(item, include_replies=include_replies))
 
