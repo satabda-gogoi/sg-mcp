@@ -442,3 +442,44 @@ def test_optional_bearer_auth_on_mcp(tmp_path: Path) -> None:
         assert http_client.get("/health").status_code == 200
         unauth = http_client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         assert unauth.status_code == 401
+
+
+def test_oauth_exchange_accepts_expanded_google_scopes(tmp_path: Path, monkeypatch) -> None:
+    import os
+    from google_auth_oauthlib.flow import Flow
+
+    settings = _make_settings(tmp_path, youtube_refresh_token="")
+    yt = YouTubeService(settings)
+    _, state = yt.create_auth_url("https://sg-mcp.onrender.com/youtube/callback")
+
+    def fake_fetch_token(self, **kwargs):
+        # Simulate Google returning extra openid/userinfo scopes alongside youtube.force-ssl
+        assert os.environ.get("OAUTHLIB_RELAX_TOKEN_SCOPE") == "1"
+        self.oauth2session.token = self.oauth2session._client.parse_request_body_response(
+            json.dumps(
+                {
+                    "access_token": "access-123",
+                    "refresh_token": "refresh-456",
+                    "token_type": "Bearer",
+                    "expires_in": 3599,
+                    "scope": (
+                        "openid https://www.googleapis.com/auth/userinfo.profile "
+                        "https://www.googleapis.com/auth/youtube.force-ssl "
+                        "https://www.googleapis.com/auth/userinfo.email"
+                    ),
+                }
+            ),
+            scope=self.oauth2session.scope,
+        )
+        return self.oauth2session.token
+
+    monkeypatch.delenv("OAUTHLIB_RELAX_TOKEN_SCOPE", raising=False)
+    monkeypatch.setattr(Flow, "fetch_token", fake_fetch_token)
+
+    result = yt.exchange_code(
+        code="auth-code-xyz",
+        redirect_uri="https://sg-mcp.onrender.com/youtube/callback",
+        state=state,
+    )
+    assert result["refresh_token"] == "refresh-456"
+    assert settings.youtube_token_file.is_file()

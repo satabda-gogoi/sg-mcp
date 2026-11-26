@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import re
 import tempfile
 import threading
@@ -131,7 +132,6 @@ class YouTubeService:
         )
         kwargs: dict[str, Any] = {
             "access_type": "offline",
-            "include_granted_scopes": "true",
             "prompt": "consent",
         }
         if self._settings.youtube_channel_email:
@@ -170,6 +170,9 @@ class YouTubeService:
             code_verifier=code_verifier,
             autogenerate_code_verifier=code_verifier is None,
         )
+        # Google may include additional granted scopes (e.g. openid, userinfo.email)
+        # in the token response; allow oauthlib to accept expanded scopes cleanly.
+        os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
         flow.fetch_token(code=code)
         creds = flow.credentials
 
