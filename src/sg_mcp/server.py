@@ -24,6 +24,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sg_mcp import __version__
 from sg_mcp.config import Settings
+from sg_mcp.instagram_service import InstagramService
 from sg_mcp.storage import AudioStorage
 from sg_mcp.tts_service import GeminiTTSService
 from sg_mcp.youtube_service import YouTubeService
@@ -98,12 +99,19 @@ def _youtube_redirect_uri(request: Request, settings: Settings) -> str:
     return f"{_base_url_from_request(request, settings)}/youtube/callback"
 
 
+def _instagram_redirect_uri(request: Request, settings: Settings) -> str:
+    if settings.instagram_redirect_uri:
+        return settings.instagram_redirect_uri
+    return f"{_base_url_from_request(request, settings)}/instagram/callback"
+
+
 def build_mcp_server(
     settings: Settings | None = None,
     tts_service: GeminiTTSService | None = None,
     storage: AudioStorage | None = None,
     youtube_service: YouTubeService | None = None,
-) -> tuple[FastMCP, Settings, GeminiTTSService, AudioStorage, YouTubeService]:
+    instagram_service: InstagramService | None = None,
+) -> tuple[FastMCP, Settings, GeminiTTSService, AudioStorage, YouTubeService, InstagramService]:
     """Build and configure the FastMCP server, tools, and HTTP routes."""
     cfg = settings or Settings.from_env()
     tts = tts_service or GeminiTTSService(cfg)
@@ -113,20 +121,20 @@ def build_mcp_server(
         max_files=cfg.max_stored_files,
     )
     yt = youtube_service or YouTubeService(cfg)
+    ig = instagram_service or InstagramService(cfg, storage=store)
 
     mcp = FastMCP(
         name="sg-mcp",
         version=__version__,
         instructions=(
-            "Cloud MCP server providing expressive text-to-speech via gemini-3.8-flash-tts "
-            "and YouTube channel management via YouTube Data API v3.\n"
-            "- TTS: Call `list_voices` to browse male/female/neutral voices, or `generate_voice` "
-            "(defaults to male voice 'charon' if `voice` is omitted) and share the returned "
-            "downloadable WAV URL.\n"
-            "- YouTube: Call `upload_youtube_video` (supports Shorts & long videos from a local "
-            "path or HTTP/HTTPS URL; defaults to 'private' privacy_status unless requested "
-            "otherwise), `get_youtube_stats` (channel + recent video views/likes/comments or "
-            "specific video stats), and `get_youtube_comments` (top-level comments + replies)."
+            "Cloud MCP server providing expressive text-to-speech via gemini-3.8-flash-tts, "
+            "YouTube channel management (YouTube Data API v3), and Instagram Professional "
+            "management (Instagram Graph API).\n"
+            "- TTS: `list_voices`, `generate_voice` (defaults to male voice 'charon').\n"
+            "- YouTube: `upload_youtube_video`, `get_youtube_stats`, `get_youtube_comments`.\n"
+            "- Instagram: `upload_instagram_content` (Reels, images, stories, carousels), "
+            "`get_instagram_stats` (followers, likes, comments count, insights), and "
+            "`get_instagram_comments` (comments + replies)."
         ),
     )
 
@@ -482,8 +490,153 @@ def build_mcp_server(
             structured_content=result,
         )
 
+    @mcp.tool(
+        name="upload_instagram_content",
+        description=(
+            "Publish a Reel, Photo, Story, or Carousel to the connected Instagram Professional "
+            "(Creator/Business) account via Instagram Graph API v27.0. Accepts a public HTTPS "
+            "`media_url` (or `media_base64`/local path when hosted on a public HTTPS URL)."
+        ),
+    )
+    async def upload_instagram_content(
+        media_type: Annotated[
+            Literal["reel", "image", "story_image", "story_video", "carousel"],
+            Field(description="Content type: 'reel', 'image', 'story_image', 'story_video', or 'carousel'."),
+        ] = "reel",
+        media_url: Annotated[
+            str | None,
+            Field(description="Public HTTPS URL of the image or video (or local path when hosted publicly)."),
+        ] = None,
+        media_base64: Annotated[
+            str | None,
+            Field(description="Optional base64-encoded media bytes (staged on server's public HTTPS URL)."),
+        ] = None,
+        caption: Annotated[
+            str,
+            Field(description="Post/Reel caption (up to 2,200 characters)."),
+        ] = "",
+        share_to_feed: Annotated[
+            bool,
+            Field(description="For Reels: whether to also show the Reel on the main profile grid."),
+        ] = True,
+        cover_url: Annotated[
+            str | None,
+            Field(description="Optional public HTTPS URL for a custom Reel cover image."),
+        ] = None,
+        thumb_offset_ms: Annotated[
+            int | None,
+            Field(description="Optional video frame offset in milliseconds for Reel thumbnail.", ge=0),
+        ] = None,
+        location_id: Annotated[
+            str | None,
+            Field(description="Optional Facebook Page location ID."),
+        ] = None,
+        carousel_items: Annotated[
+            list[dict[str, str] | str] | None,
+            Field(description="For media_type='carousel': list of 2-10 public URLs or {media_url, media_type} objects."),
+        ] = None,
+        is_ai_generated: Annotated[
+            bool | None,
+            Field(description="Optional Meta AI-generated content self-disclosure flag."),
+        ] = None,
+    ) -> ToolResult:
+        """Publish content to Instagram and return the published media ID and permalink."""
+        base_url = _resolve_base_url(cfg)
+        result = await anyio.to_thread.run_sync(
+            lambda: ig.upload_content(
+                media_type=media_type,
+                media_url=media_url,
+                media_base64=media_base64,
+                caption=caption,
+                share_to_feed=share_to_feed,
+                cover_url=cover_url,
+                thumb_offset_ms=thumb_offset_ms,
+                location_id=location_id,
+                carousel_items=carousel_items,
+                is_ai_generated=is_ai_generated,
+                public_base_url=base_url,
+            )
+        )
+        summary = (
+            f"Published Instagram {result.get('media_type', media_type)}!\n"
+            f"- Media ID: `{result['media_id']}`\n"
+            f"- Permalink: {result.get('permalink') or '(not returned)'}"
+        )
+        return ToolResult(
+            content=[TextContent(type="text", text=summary)],
+            structured_content=result,
+        )
+
+    @mcp.tool(
+        name="get_instagram_stats",
+        description=(
+            "Read Instagram statistics: if `media_id` is provided, returns that post/Reel's "
+            "like_count, comments_count, and insights (views, reach, saved, shares, total_interactions). "
+            "If `media_id` is omitted, returns account followers_count, media_count, recent posts "
+            "with likes/comments, and account insights."
+        ),
+    )
+    async def get_instagram_stats(
+        media_id: Annotated[
+            str | None,
+            Field(description="Optional Instagram Media ID. Omit to get account overview + recent posts."),
+        ] = None,
+        max_posts: Annotated[
+            int,
+            Field(description="Maximum recent posts to include when media_id is omitted (1-50).", ge=1, le=50),
+        ] = 10,
+    ) -> ToolResult:
+        """Fetch Instagram account or post statistics and insights."""
+        result = await anyio.to_thread.run_sync(
+            lambda: ig.get_stats(media_id=media_id, max_posts=max_posts)
+        )
+        return ToolResult(
+            content=[TextContent(type="text", text=json.dumps(result, indent=2))],
+            structured_content=result,
+        )
+
+    @mcp.tool(
+        name="get_instagram_comments",
+        description=(
+            "Read comments and replies on a specific Instagram post/Reel (`media_id`), or "
+            "across the most recent posts if `media_id` is omitted."
+        ),
+    )
+    async def get_instagram_comments(
+        media_id: Annotated[
+            str | None,
+            Field(description="Optional Instagram Media ID. Omit to check comments across recent posts."),
+        ] = None,
+        max_posts: Annotated[
+            int,
+            Field(description="When media_id is omitted, number of recent posts to check (1-20).", ge=1, le=20),
+        ] = 5,
+        limit: Annotated[
+            int,
+            Field(description="Maximum comments to return (1-100).", ge=1, le=100),
+        ] = 50,
+        include_replies: Annotated[
+            bool,
+            Field(description="Include nested comment replies."),
+        ] = True,
+    ) -> ToolResult:
+        """Fetch Instagram comments and replies."""
+        result = await anyio.to_thread.run_sync(
+            lambda: ig.get_comments(
+                media_id=media_id,
+                max_posts=max_posts,
+                limit=limit,
+                include_replies=include_replies,
+            )
+        )
+        return ToolResult(
+            content=[TextContent(type="text", text=json.dumps(result, indent=2))],
+            structured_content=result,
+        )
+
     @mcp.custom_route("/", methods=["GET"])
     async def root_info(request: Request) -> JSONResponse:
+        base_url = _base_url_from_request(request, cfg)
         return JSONResponse(
             {
                 "service": "sg-mcp",
@@ -496,13 +649,20 @@ def build_mcp_server(
                 "api_keys_configured": len(cfg.api_keys),
                 "youtube_oauth_client_configured": yt.has_oauth_client(),
                 "youtube_authenticated": yt.is_authenticated(),
-                "youtube_auth_url": f"{_base_url_from_request(request, cfg)}/youtube/auth",
+                "youtube_auth_url": f"{base_url}/youtube/auth",
+                "instagram_app_configured": ig.has_app_credentials(),
+                "instagram_authenticated": ig.is_authenticated(),
+                "instagram_auth_mode": ig.auth_mode,
+                "instagram_auth_url": f"{base_url}/instagram/auth",
                 "tools": [
                     "generate_voice",
                     "list_voices",
                     "upload_youtube_video",
                     "get_youtube_stats",
                     "get_youtube_comments",
+                    "upload_instagram_content",
+                    "get_instagram_stats",
+                    "get_instagram_comments",
                 ],
             }
         )
@@ -518,17 +678,17 @@ def build_mcp_server(
         record = store.get(file_id)
         if not record:
             return JSONResponse(
-                {"error": "Audio file not found or expired."},
+                {"error": "File not found or expired."},
                 status_code=404,
             )
 
         inline = request.query_params.get("inline", "").lower() in {"1", "true", "yes"}
         disposition = "inline" if inline else "attachment"
-        wav_bytes = await anyio.to_thread.run_sync(record.path.read_bytes)
+        data_bytes = await anyio.to_thread.run_sync(record.path.read_bytes)
 
         return Response(
-            content=wav_bytes,
-            media_type="audio/wav",
+            content=data_bytes,
+            media_type=record.mime_type,
             headers={
                 "Content-Disposition": f'{disposition}; filename="{record.filename}"',
                 "Cache-Control": "no-store",
@@ -592,7 +752,66 @@ def build_mcp_server(
 </html>"""
         return HTMLResponse(body, status_code=200)
 
-    return mcp, cfg, tts, store, yt
+    @mcp.custom_route("/instagram/auth", methods=["GET"])
+    async def instagram_auth_start(request: Request) -> Response:
+        if not ig.has_app_credentials():
+            return JSONResponse(
+                {"error": "META_APP_ID and META_APP_SECRET are not configured."},
+                status_code=500,
+            )
+        redirect_uri = _instagram_redirect_uri(request, cfg)
+        auth_url, _ = ig.create_auth_url(redirect_uri)
+        return RedirectResponse(url=auth_url, status_code=302)
+
+    @mcp.custom_route("/instagram/callback", methods=["GET"])
+    async def instagram_auth_callback(request: Request) -> Response:
+        error = request.query_params.get("error") or request.query_params.get("error_message")
+        if error:
+            reason = request.query_params.get("error_description") or error
+            return HTMLResponse(
+                f"<h2>Instagram OAuth Failed</h2><p>{html.escape(reason)}</p>",
+                status_code=400,
+            )
+
+        code = request.query_params.get("code", "").strip()
+        if not code:
+            return HTMLResponse(
+                "<h2>Missing OAuth authorization code.</h2>",
+                status_code=400,
+            )
+
+        state = request.query_params.get("state")
+        redirect_uri = _instagram_redirect_uri(request, cfg)
+        try:
+            tokens = await anyio.to_thread.run_sync(
+                lambda: ig.exchange_code(code=code, redirect_uri=redirect_uri, state=state)
+            )
+        except Exception as exc:
+            logger.exception("Instagram OAuth callback failed")
+            return HTMLResponse(
+                f"<h2>Instagram token exchange failed</h2><pre>{html.escape(str(exc))}</pre>",
+                status_code=500,
+            )
+
+        ig_token = html.escape(tokens.get("access_token") or "")
+        ig_uid = html.escape(str(tokens.get("ig_user_id") or ""))
+        ig_username = html.escape(str(tokens.get("ig_username") or ""))
+        auth_mode = html.escape(str(tokens.get("auth_mode") or ig.auth_mode))
+        body = f"""<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>sg-mcp Instagram Connected</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;">
+  <h2>Instagram Account Connected (@{ig_username})</h2>
+  <p>Auth mode: <code>{auth_mode}</code> | Saved locally to <code>{html.escape(str(cfg.instagram_token_file))}</code></p>
+  <p>For cloud deployments (Render / Google Cloud Run), copy these environment variables:</p>
+  <pre style="background:#111;color:#0f0;padding:12px;border-radius:8px;overflow:auto;">INSTAGRAM_USER_ID={ig_uid}
+INSTAGRAM_ACCESS_TOKEN={ig_token}</pre>
+  <p>You can close this tab now.</p>
+</body>
+</html>"""
+        return HTMLResponse(body, status_code=200)
+
+    return mcp, cfg, tts, store, yt, ig
 
 
 def create_app(
@@ -600,13 +819,15 @@ def create_app(
     tts_service: GeminiTTSService | None = None,
     storage: AudioStorage | None = None,
     youtube_service: YouTubeService | None = None,
+    instagram_service: InstagramService | None = None,
 ) -> Any:
     """Create the production ASGI application exposing Streamable HTTP MCP + routes."""
-    mcp, cfg, _, _, _ = build_mcp_server(
+    mcp, cfg, _, _, _, _ = build_mcp_server(
         settings=settings,
         tts_service=tts_service,
         storage=storage,
         youtube_service=youtube_service,
+        instagram_service=instagram_service,
     )
 
     middlewares: list[Middleware] = [

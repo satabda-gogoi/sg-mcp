@@ -8,11 +8,13 @@ import wave
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastmcp import Client
 from starlette.testclient import TestClient
 
 from sg_mcp.config import Settings
+from sg_mcp.instagram_service import InstagramService
 from sg_mcp.server import build_mcp_server, create_app
 from sg_mcp.storage import AudioStorage
 from sg_mcp.tts_service import GeminiTTSService
@@ -42,6 +44,14 @@ def _make_settings(tmp_path: Path, **overrides) -> Settings:
         youtube_token_file=tmp_path / "youtube_token.json",
         youtube_channel_email="dev.satabda@gmail.com",
         youtube_redirect_uri="",
+        meta_app_id="meta-app-id",
+        meta_app_secret="meta-app-secret",
+        instagram_access_token="ig-access-token",
+        instagram_user_id="17841400000000001",
+        instagram_auth_mode="facebook",
+        instagram_graph_version="v27.0",
+        instagram_token_file=tmp_path / "instagram_token.json",
+        instagram_redirect_uri="",
         host="127.0.0.1",
         port=8080,
         public_base_url="https://example.run.app",
@@ -354,7 +364,7 @@ async def test_mcp_tts_and_youtube_tools(tmp_path: Path) -> None:
     demo_mp4 = tmp_path / "demo.mp4"
     demo_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
-    mcp, _, _, _, _ = build_mcp_server(
+    mcp, _, _, _, _, _ = build_mcp_server(
         settings=settings, tts_service=tts, storage=store, youtube_service=yt
     )
 
@@ -430,6 +440,7 @@ async def test_mcp_tts_and_youtube_tools(tmp_path: Path) -> None:
         root = http_client.get("/")
         assert root.status_code == 200
         assert "upload_youtube_video" in root.json()["tools"]
+        assert "upload_instagram_content" in root.json()["tools"]
 
         dl = http_client.get(f"/download/{file_id}/test.wav")
         assert dl.status_code == 200
@@ -438,6 +449,10 @@ async def test_mcp_tts_and_youtube_tools(tmp_path: Path) -> None:
         auth_redir = http_client.get("/youtube/auth", follow_redirects=False)
         assert auth_redir.status_code == 302
         assert "accounts.google.com/o/oauth2/auth" in auth_redir.headers["location"]
+
+        ig_redir = http_client.get("/instagram/auth", follow_redirects=False)
+        assert ig_redir.status_code == 302
+        assert "facebook.com/v27.0/dialog/oauth" in ig_redir.headers["location"]
 
 
 def test_optional_bearer_auth_on_mcp(tmp_path: Path) -> None:
@@ -495,3 +510,174 @@ def test_oauth_exchange_accepts_expanded_google_scopes(tmp_path: Path, monkeypat
     )
     assert result["refresh_token"] == "refresh-456"
     assert settings.youtube_token_file.is_file()
+
+
+@pytest.mark.anyio
+async def test_instagram_oauth_and_mcp_tools(tmp_path: Path) -> None:
+    import base64
+
+    recorded_requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded_requests.append((request.method, str(request.url)))
+        path = request.url.path
+        if path.endswith("/oauth/access_token"):
+            if request.url.params.get("grant_type") == "fb_exchange_token":
+                return httpx.Response(200, json={"access_token": "long-user-token", "expires_in": 5184000})
+            return httpx.Response(200, json={"access_token": "short-user-token"})
+        if path.endswith("/me/accounts"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "page-1",
+                            "name": "StupidlySimpleOne Page",
+                            "access_token": "page-token-xyz",
+                            "instagram_business_account": {
+                                "id": "17841400000000001",
+                                "username": "stupidlysimpleone",
+                            },
+                        }
+                    ]
+                },
+            )
+        if path.endswith("/17841400000000001/media") and request.method == "POST":
+            return httpx.Response(200, json={"id": "container-999"})
+        if path.endswith("/container-999"):
+            return httpx.Response(200, json={"id": "container-999", "status_code": "FINISHED"})
+        if path.endswith("/17841400000000001/media_publish") and request.method == "POST":
+            return httpx.Response(200, json={"id": "media-777"})
+        if path.endswith("/media-777/insights"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"name": "views", "values": [{"value": 320}]},
+                        {"name": "reach", "values": [{"value": 280}]},
+                        {"name": "saved", "values": [{"value": 12}]},
+                        {"name": "shares", "values": [{"value": 5}]},
+                        {"name": "total_interactions", "values": [{"value": 45}]},
+                    ]
+                },
+            )
+        if path.endswith("/media-777/comments"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "ig-c1",
+                            "username": "fan_user",
+                            "text": "Awesome reel!",
+                            "like_count": 4,
+                            "hidden": False,
+                            "timestamp": "2026-11-26T10:00:00+0000",
+                            "replies": {
+                                "data": [
+                                    {
+                                        "id": "ig-r1",
+                                        "username": "stupidlysimpleone",
+                                        "text": "Thank you!",
+                                        "like_count": 1,
+                                        "timestamp": "2026-11-26T10:05:00+0000",
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+            )
+        if path.endswith("/media-777"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "media-777",
+                    "caption": "Test IG Reel",
+                    "media_type": "VIDEO",
+                    "media_product_type": "REELS",
+                    "permalink": "https://www.instagram.com/reel/ABC123/",
+                    "shortcode": "ABC123",
+                    "timestamp": "2026-11-26T09:55:00+0000",
+                    "like_count": 28,
+                    "comments_count": 2,
+                },
+            )
+        if path.endswith("/17841400000000001/insights"):
+            return httpx.Response(
+                200,
+                json={"data": [{"name": "reach", "total_value": {"value": 500}}]},
+            )
+        if path.endswith("/17841400000000001/media") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "media-777",
+                            "caption": "Test IG Reel",
+                            "media_type": "VIDEO",
+                            "media_product_type": "REELS",
+                            "permalink": "https://www.instagram.com/reel/ABC123/",
+                            "timestamp": "2026-11-26T09:55:00+0000",
+                            "like_count": 28,
+                            "comments_count": 2,
+                        }
+                    ]
+                },
+            )
+        if path.endswith("/17841400000000001"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "17841400000000001",
+                    "username": "stupidlysimpleone",
+                    "name": "Stupidly Simple One",
+                    "followers_count": 125,
+                    "follows_count": 10,
+                    "media_count": 1,
+                },
+            )
+        return httpx.Response(404, json={"error": {"message": f"Unhandled mock path {path}"}})
+
+    mock_http = httpx.Client(transport=httpx.MockTransport(handler))
+    settings = _make_settings(tmp_path, instagram_access_token="", instagram_user_id="")
+    store = AudioStorage(settings.audio_storage_dir, ttl_seconds=3600, max_files=20)
+    ig = InstagramService(settings, storage=store, http_client=mock_http)
+
+    # 1. Test OAuth exchange (Facebook Login -> Long-lived token -> Linked IG account)
+    _, state = ig.create_auth_url("https://example.run.app/instagram/callback")
+    exchanged = ig.exchange_code(
+        code="fb-code-123",
+        redirect_uri="https://example.run.app/instagram/callback",
+        state=state,
+    )
+    assert exchanged["ig_user_id"] == "17841400000000001"
+    assert exchanged["ig_username"] == "stupidlysimpleone"
+    assert exchanged["access_token"] == "page-token-xyz"
+    assert settings.instagram_token_file.is_file()
+
+    # 2. Test MCP tools via FastMCP Client
+    mcp, _, _, _, _, _ = build_mcp_server(settings=settings, storage=store, instagram_service=ig)
+    async with Client(mcp) as client:
+        b64_mp4 = base64.b64encode(b"\x00\x00\x00\x18ftypmp42").decode()
+        pub = await client.call_tool(
+            "upload_instagram_content",
+            {"media_type": "reel", "media_base64": b64_mp4, "caption": "Test IG Reel"},
+        )
+        assert pub.structured_content["media_id"] == "media-777"
+        assert pub.structured_content["permalink"] == "https://www.instagram.com/reel/ABC123/"
+
+        acct_stats = await client.call_tool("get_instagram_stats", {})
+        assert acct_stats.structured_content["scope"] == "account"
+        assert acct_stats.structured_content["account"]["username"] == "stupidlysimpleone"
+        assert acct_stats.structured_content["recent_posts"][0]["like_count"] == 28
+
+        media_stats = await client.call_tool("get_instagram_stats", {"media_id": "media-777"})
+        assert media_stats.structured_content["scope"] == "media"
+        assert media_stats.structured_content["media"]["insights"]["views"] == 320
+
+        comments = await client.call_tool("get_instagram_comments", {})
+        assert comments.structured_content["total_comments_returned"] == 1
+        assert comments.structured_content["comments"][0]["text"] == "Awesome reel!"
+        assert comments.structured_content["comments"][0]["replies"][0]["text"] == "Thank you!"

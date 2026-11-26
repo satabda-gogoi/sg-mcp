@@ -1,7 +1,8 @@
-"""Ephemeral downloadable audio file storage with TTL and capacity eviction."""
+"""Ephemeral downloadable audio/media file storage with TTL and capacity eviction."""
 
 from __future__ import annotations
 
+import mimetypes
 import re
 import threading
 import time
@@ -15,7 +16,7 @@ _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 @dataclass(frozen=True)
 class StoredAudio:
-    """Metadata for a generated audio file available for HTTP download."""
+    """Metadata for a generated file available for HTTP download."""
 
     file_id: str
     filename: str
@@ -23,16 +24,17 @@ class StoredAudio:
     size_bytes: int
     created_at: float
     expires_at: float
+    mime_type: str = "audio/wav"
 
 
 def sanitize_filename_prefix(value: str | None, fallback: str = "voice") -> str:
     """Convert an arbitrary string into a URL-safe filename prefix."""
     cleaned = _SAFE_NAME_RE.sub("_", (value or "").strip()).strip("_").lower()
-    return (cleaned[:40] or fallback)
+    return cleaned[:40] or fallback
 
 
 class AudioStorage:
-    """Thread-safe local disk store for downloadable WAV files with TTL cleanup."""
+    """Thread-safe local disk store for downloadable audio/media files with TTL cleanup."""
 
     def __init__(
         self,
@@ -55,25 +57,49 @@ class AudioStorage:
         filename_prefix: str | None = None,
     ) -> StoredAudio:
         """Persist WAV bytes and return a StoredAudio descriptor."""
-        now = time.time()
-        file_id = uuid.uuid4().hex[:16]
         prefix = sanitize_filename_prefix(filename_prefix or voice_id, fallback="tts")
         voice_slug = sanitize_filename_prefix(voice_id, fallback="voice")
-        if prefix == voice_slug:
-            filename = f"{prefix}_{file_id[:8]}.wav"
-        else:
-            filename = f"{prefix}_{voice_slug}_{file_id[:8]}.wav"
+        combined = prefix if prefix == voice_slug else f"{prefix}_{voice_slug}"
+        return self.save_bytes(
+            wav_bytes,
+            extension=".wav",
+            filename_prefix=combined,
+            mime_type="audio/wav",
+        )
 
-        file_path = self._base_dir / f"{file_id}.wav"
-        file_path.write_bytes(wav_bytes)
+    def save_bytes(
+        self,
+        data: bytes,
+        *,
+        extension: str = ".bin",
+        filename_prefix: str | None = None,
+        mime_type: str | None = None,
+    ) -> StoredAudio:
+        """Persist arbitrary media bytes (WAV, MP4, JPG, PNG, etc.) with TTL cleanup."""
+        now = time.time()
+        file_id = uuid.uuid4().hex[:16]
+        ext = extension if extension.startswith(".") else f".{extension}"
+        ext = re.sub(r"[^a-zA-Z0-9.]", "", ext).lower() or ".bin"
+        prefix = sanitize_filename_prefix(filename_prefix, fallback="media")
+        filename = f"{prefix}_{file_id[:8]}{ext}"
+
+        resolved_mime = (
+            mime_type
+            or mimetypes.guess_type(filename)[0]
+            or "application/octet-stream"
+        )
+
+        file_path = self._base_dir / f"{file_id}{ext}"
+        file_path.write_bytes(data)
 
         record = StoredAudio(
             file_id=file_id,
             filename=filename,
             path=file_path,
-            size_bytes=len(wav_bytes),
+            size_bytes=len(data),
             created_at=now,
             expires_at=now + self._ttl_seconds,
+            mime_type=resolved_mime,
         )
 
         with self._lock:
@@ -83,7 +109,7 @@ class AudioStorage:
         return record
 
     def get(self, file_id: str) -> StoredAudio | None:
-        """Look up a non-expired audio file by its ID."""
+        """Look up a non-expired file by its ID."""
         cleaned_id = (file_id or "").strip().lower()
         if not _HEX_ID_RE.match(cleaned_id):
             return None

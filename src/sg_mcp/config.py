@@ -48,6 +48,14 @@ class Settings:
     youtube_token_file: Path
     youtube_channel_email: str
     youtube_redirect_uri: str
+    meta_app_id: str
+    meta_app_secret: str
+    instagram_access_token: str
+    instagram_user_id: str
+    instagram_auth_mode: str
+    instagram_graph_version: str
+    instagram_token_file: Path
+    instagram_redirect_uri: str
     host: str
     port: int
     public_base_url: str
@@ -74,6 +82,21 @@ class Settings:
             ),
             youtube_channel_email=os.getenv("YOUTUBE_CHANNEL_EMAIL", "").strip(),
             youtube_redirect_uri=os.getenv("YOUTUBE_REDIRECT_URI", "").strip(),
+            meta_app_id=os.getenv("META_APP_ID", "").strip(),
+            meta_app_secret=os.getenv("META_APP_SECRET", "").strip(),
+            instagram_access_token=os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip(),
+            instagram_user_id=os.getenv("INSTAGRAM_USER_ID", "").strip(),
+            instagram_auth_mode=(
+                os.getenv("INSTAGRAM_AUTH_MODE", "facebook").strip().lower() or "facebook"
+            ),
+            instagram_graph_version=(
+                os.getenv("INSTAGRAM_GRAPH_VERSION", "v27.0").strip() or "v27.0"
+            ),
+            instagram_token_file=Path(
+                os.getenv("INSTAGRAM_TOKEN_FILE", "./instagram_token.json").strip()
+                or "./instagram_token.json"
+            ),
+            instagram_redirect_uri=os.getenv("INSTAGRAM_REDIRECT_URI", "").strip(),
             host=os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=int(os.getenv("PORT", "8080")),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),

@@ -19,6 +19,18 @@ services:
         sync: false
       - key: YOUTUBE_CHANNEL_EMAIL
         sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: INSTAGRAM_ACCESS_TOKEN
+        sync: false
+      - key: INSTAGRAM_USER_ID
+        sync: false
+      - key: INSTAGRAM_AUTH_MODE
+        value: facebook
+      - key: INSTAGRAM_GRAPH_VERSION
+        value: v27.0
       - key: AUDIO_STORAGE_DIR
         value: /tmp/sg-mcp-audio
       - key: AUDIO_TTL_SECONDS
