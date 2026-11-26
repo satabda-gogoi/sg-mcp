@@ -81,7 +81,14 @@ class InstagramService:
 
     @property
     def auth_mode(self) -> str:
-        return "instagram" if self._settings.instagram_auth_mode == "instagram" else "facebook"
+        mode = (self._settings.instagram_auth_mode or "").strip().lower()
+        if mode == "instagram":
+            return "instagram"
+        if mode == "unified" or (mode != "facebook" and bool(self._settings.meta_config_id)):
+            return "unified"
+        if mode == "facebook" and self._settings.meta_config_id:
+            return "unified"
+        return "facebook"
 
     @property
     def graph_version(self) -> str:
@@ -159,6 +166,132 @@ class InstagramService:
             raise RuntimeError(_extract_error_message(resp))
         return payload
 
+    def _resolve_facebook_or_unified_ig_account(self, access_token: str) -> dict[str, Any]:
+        """Resolve IG account ID + best access token across Unified Login and Page-linked flows."""
+        base = f"https://graph.facebook.com/{self.graph_version}"
+
+        # 1. Unified Login (Facebook Login for Business SUAT): /me/assigned_instagram_accounts
+        try:
+            assigned = self._request(
+                "GET",
+                f"{base}/me/assigned_instagram_accounts",
+                params={"fields": "id,username,name", "access_token": access_token},
+            )
+            items = assigned.get("data") or []
+            if items and items[0].get("id"):
+                return {
+                    "ig_user_id": str(items[0]["id"]),
+                    "ig_username": items[0].get("username"),
+                    "access_token": access_token,
+                    "source": "assigned_instagram_accounts",
+                }
+        except Exception:
+            pass
+
+        # 2. Unified Login Business Portfolio: /me?fields=client_business_id -> /{biz}/owned_instagram_accounts
+        try:
+            me_biz = self._request(
+                "GET",
+                f"{base}/me",
+                params={"fields": "id,client_business_id", "access_token": access_token},
+            )
+            biz_id = me_biz.get("client_business_id")
+            if biz_id:
+                for edge in ("owned_instagram_accounts", "client_instagram_accounts"):
+                    try:
+                        biz_accts = self._request(
+                            "GET",
+                            f"{base}/{biz_id}/{edge}",
+                            params={"fields": "id,username,name", "access_token": access_token},
+                        )
+                        items = biz_accts.get("data") or []
+                        if items and items[0].get("id"):
+                            return {
+                                "ig_user_id": str(items[0]["id"]),
+                                "ig_username": items[0].get("username"),
+                                "access_token": access_token,
+                                "business_id": str(biz_id),
+                                "source": edge,
+                            }
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 3. Traditional Facebook Login: /me/accounts -> instagram_business_account
+        pages_count = 0
+        page_names: list[str] = []
+        try:
+            pages_resp = self._request(
+                "GET",
+                f"{base}/me/accounts",
+                params={
+                    "fields": "id,name,access_token,instagram_business_account{id,username,name,followers_count,media_count}",
+                    "access_token": access_token,
+                },
+            )
+            pages = pages_resp.get("data") or []
+            pages_count = len(pages)
+            page_names = [str(p.get("name") or p.get("id")) for p in pages]
+            linked_page = next(
+                (p for p in pages if isinstance(p.get("instagram_business_account"), dict)),
+                None,
+            )
+            if linked_page:
+                ig_acct = linked_page["instagram_business_account"]
+                return {
+                    "ig_user_id": str(ig_acct["id"]),
+                    "ig_username": ig_acct.get("username"),
+                    "access_token": linked_page.get("access_token") or access_token,
+                    "page_id": linked_page.get("id"),
+                    "page_name": linked_page.get("name"),
+                    "source": "me_accounts",
+                }
+        except Exception:
+            pass
+
+        # 4. Granular scopes target_ids via /debug_token (works even when portfolio edges are restricted)
+        granted_scopes: list[str] = []
+        if self.has_app_credentials():
+            try:
+                app_token = f"{self._settings.meta_app_id}|{self._settings.meta_app_secret}"
+                dbg = self._request(
+                    "GET",
+                    f"{base}/debug_token",
+                    params={"input_token": access_token, "access_token": app_token},
+                )
+                dbg_data = dbg.get("data") or {}
+                granted_scopes = list(dbg_data.get("scopes") or [])
+                for gs in dbg_data.get("granular_scopes") or []:
+                    target_ids = gs.get("target_ids") or []
+                    if target_ids and gs.get("scope", "").startswith("instagram"):
+                        ig_id = str(target_ids[0])
+                        ig_username = None
+                        try:
+                            ig_info = self._request(
+                                "GET",
+                                f"{base}/{ig_id}",
+                                params={"fields": "id,username", "access_token": access_token},
+                            )
+                            ig_username = ig_info.get("username")
+                        except Exception:
+                            pass
+                        return {
+                            "ig_user_id": ig_id,
+                            "ig_username": ig_username,
+                            "access_token": access_token,
+                            "source": "debug_token_granular_scopes",
+                        }
+            except Exception:
+                pass
+
+        raise RuntimeError(
+            "Meta Login succeeded, but no Instagram Professional account was returned "
+            f"(pages_found={pages_count} {page_names}, granted_scopes={granted_scopes}). "
+            "Ensure you selected your Instagram Professional account in the Meta Login popup "
+            "(for Unified Login, set META_CONFIG_ID and assign the IG account in the Business Portfolio)."
+        )
+
     def _discover_ig_user_id(self, access_token: str) -> str:
         if self.auth_mode == "instagram":
             me = self._request(
@@ -171,25 +304,10 @@ class InstagramService:
                 raise RuntimeError("Could not determine Instagram user_id from /me.")
             return uid
 
-        pages = self._request(
-            "GET",
-            f"{self.api_base}/me/accounts",
-            params={
-                "fields": "id,name,access_token,instagram_business_account{id,username}",
-                "access_token": access_token,
-            },
-        )
-        for page in pages.get("data") or []:
-            ig = page.get("instagram_business_account")
-            if isinstance(ig, dict) and ig.get("id"):
-                return str(ig["id"])
+        resolved = self._resolve_facebook_or_unified_ig_account(access_token)
+        return str(resolved["ig_user_id"])
 
-        raise RuntimeError(
-            "No Instagram Professional account linked to any Facebook Page was found for this token. "
-            "Link your Instagram Creator/Business account to a Facebook Page, or set INSTAGRAM_USER_ID."
-        )
-
-    def create_auth_url(self, redirect_uri: str) -> tuple[str, str]:
+    def create_auth_url(self, redirect_uri: str, config_id: str | None = None) -> tuple[str, str]:
         """Build the Meta/Instagram OAuth 2.0 authorization URL and track CSRF state."""
         if not self.has_app_credentials():
             raise RuntimeError(
@@ -197,12 +315,32 @@ class InstagramService:
             )
 
         state = secrets.token_urlsafe(24)
-        if self.auth_mode == "instagram":
+        effective_config_id = (config_id or self._settings.meta_config_id or "").strip()
+        mode = self.auth_mode
+        if effective_config_id and mode != "instagram":
+            mode = "unified"
+
+        if mode == "instagram":
             base = "https://www.instagram.com/oauth/authorize"
             params = {
                 "client_id": self._settings.meta_app_id,
                 "redirect_uri": redirect_uri,
                 "scope": ",".join(INSTAGRAM_LOGIN_SCOPES),
+                "response_type": "code",
+                "state": state,
+            }
+        elif mode == "unified":
+            if not effective_config_id:
+                raise RuntimeError(
+                    "META_CONFIG_ID is required for Instagram API with Unified Login. "
+                    "Copy the Config ID from Meta for Developers -> Use cases -> "
+                    "Manage messaging & content on Instagram -> API setup with Unified login."
+                )
+            base = f"https://www.facebook.com/{self.graph_version}/dialog/oauth"
+            params = {
+                "client_id": self._settings.meta_app_id,
+                "redirect_uri": redirect_uri,
+                "config_id": effective_config_id,
                 "response_type": "code",
                 "state": state,
             }
@@ -221,7 +359,7 @@ class InstagramService:
             stale = [s for s, (_, _, ts) in self._pending_states.items() if now - ts > 900]
             for s in stale:
                 self._pending_states.pop(s, None)
-            self._pending_states[state] = (redirect_uri, self.auth_mode, now)
+            self._pending_states[state] = (redirect_uri, mode, now)
 
         return f"{base}?{urlencode(params)}", state
 
@@ -292,8 +430,8 @@ class InstagramService:
             self._save_token_data(payload)
             return payload
 
-        # Facebook Login flow -> exchange short token for 60-day token -> find linked IG Professional account
-        short_resp = self._request(
+        # Facebook Login / Unified Login flow
+        token_resp = self._request(
             "GET",
             f"https://graph.facebook.com/{self.graph_version}/oauth/access_token",
             params={
@@ -303,53 +441,41 @@ class InstagramService:
                 "code": code,
             },
         )
-        short_token = short_resp["access_token"]
+        initial_token = token_resp["access_token"]
+        expires_in = token_resp.get("expires_in")
+        working_token = initial_token
 
-        long_resp = self._request(
-            "GET",
-            f"https://graph.facebook.com/{self.graph_version}/oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": self._settings.meta_app_id,
-                "client_secret": self._settings.meta_app_secret,
-                "fb_exchange_token": short_token,
-            },
-        )
-        long_user_token = long_resp["access_token"]
-        expires_in = long_resp.get("expires_in")
+        # Unified Login returns a Business Integration SUAT directly; for standard user tokens,
+        # exchange for a 60-day long-lived user token (ignore cleanly if already a SUAT).
+        if mode != "unified":
+            try:
+                long_resp = self._request(
+                    "GET",
+                    f"https://graph.facebook.com/{self.graph_version}/oauth/access_token",
+                    params={
+                        "grant_type": "fb_exchange_token",
+                        "client_id": self._settings.meta_app_id,
+                        "client_secret": self._settings.meta_app_secret,
+                        "fb_exchange_token": initial_token,
+                    },
+                )
+                working_token = long_resp.get("access_token") or initial_token
+                expires_in = long_resp.get("expires_in") or expires_in
+            except Exception as exc:
+                logger.info("Skipping fb_exchange_token (likely already SUAT): %s", exc)
 
-        pages_resp = self._request(
-            "GET",
-            f"https://graph.facebook.com/{self.graph_version}/me/accounts",
-            params={
-                "fields": "id,name,access_token,instagram_business_account{id,username,name,followers_count,media_count}",
-                "access_token": long_user_token,
-            },
-        )
-        pages = pages_resp.get("data") or []
-        linked_page = next(
-            (p for p in pages if isinstance(p.get("instagram_business_account"), dict)),
-            None,
-        )
-        if not linked_page:
-            raise RuntimeError(
-                "Facebook Login succeeded, but no Facebook Page with a linked Instagram Professional "
-                "account was returned. Link your Instagram Creator/Business account to a Facebook Page "
-                "and re-grant permissions (ensure 'pages_show_list' and 'instagram_basic' are approved)."
-            )
-
-        ig_acct = linked_page["instagram_business_account"]
-        # Page token derived from long-lived user token stays valid as long as user connection remains active
-        best_token = linked_page.get("access_token") or long_user_token
+        resolved = self._resolve_facebook_or_unified_ig_account(working_token)
         payload = {
-            "auth_mode": "facebook",
-            "access_token": best_token,
-            "user_access_token": long_user_token,
+            "auth_mode": mode,
+            "access_token": resolved["access_token"],
+            "user_access_token": working_token,
             "expires_in": expires_in,
-            "page_id": linked_page.get("id"),
-            "page_name": linked_page.get("name"),
-            "ig_user_id": str(ig_acct["id"]),
-            "ig_username": ig_acct.get("username"),
+            "page_id": resolved.get("page_id"),
+            "page_name": resolved.get("page_name"),
+            "business_id": resolved.get("business_id"),
+            "ig_user_id": resolved["ig_user_id"],
+            "ig_username": resolved.get("ig_username"),
+            "discovery_source": resolved.get("source"),
             "obtained_at": int(time.time()),
         }
         self._save_token_data(payload)

@@ -46,6 +46,7 @@ def _make_settings(tmp_path: Path, **overrides) -> Settings:
         youtube_redirect_uri="",
         meta_app_id="meta-app-id",
         meta_app_secret="meta-app-secret",
+        meta_config_id="",
         instagram_access_token="ig-access-token",
         instagram_user_id="17841400000000001",
         instagram_auth_mode="facebook",
@@ -681,3 +682,43 @@ async def test_instagram_oauth_and_mcp_tools(tmp_path: Path) -> None:
         assert comments.structured_content["total_comments_returned"] == 1
         assert comments.structured_content["comments"][0]["text"] == "Awesome reel!"
         assert comments.structured_content["comments"][0]["replies"][0]["text"] == "Thank you!"
+
+
+def test_instagram_unified_login_flow(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "suat-token-999"})
+        if path.endswith("/me/assigned_instagram_accounts"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"id": "17841400000000099", "username": "stupidlysimpleone"}
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"error": {"message": f"Unexpected {path}"}})
+
+    mock_http = httpx.Client(transport=httpx.MockTransport(handler))
+    settings = _make_settings(
+        tmp_path,
+        instagram_auth_mode="unified",
+        meta_config_id="cfg-1234567890",
+        instagram_access_token="",
+        instagram_user_id="",
+    )
+    ig = InstagramService(settings, http_client=mock_http)
+    auth_url, state = ig.create_auth_url("https://sg-mcp.onrender.com/instagram/callback")
+    assert "config_id=cfg-1234567890" in auth_url
+    assert "scope=" not in auth_url
+
+    exchanged = ig.exchange_code(
+        code="unified-code-123",
+        redirect_uri="https://sg-mcp.onrender.com/instagram/callback",
+        state=state,
+    )
+    assert exchanged["auth_mode"] == "unified"
+    assert exchanged["ig_user_id"] == "17841400000000099"
+    assert exchanged["ig_username"] == "stupidlysimpleone"
+    assert exchanged["access_token"] == "suat-token-999"

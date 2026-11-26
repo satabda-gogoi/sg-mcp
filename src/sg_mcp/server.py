@@ -651,6 +651,7 @@ def build_mcp_server(
                 "youtube_authenticated": yt.is_authenticated(),
                 "youtube_auth_url": f"{base_url}/youtube/auth",
                 "instagram_app_configured": ig.has_app_credentials(),
+                "instagram_config_id_configured": bool(cfg.meta_config_id),
                 "instagram_authenticated": ig.is_authenticated(),
                 "instagram_auth_mode": ig.auth_mode,
                 "instagram_auth_url": f"{base_url}/instagram/auth",
@@ -760,7 +761,14 @@ def build_mcp_server(
                 status_code=500,
             )
         redirect_uri = _instagram_redirect_uri(request, cfg)
-        auth_url, _ = ig.create_auth_url(redirect_uri)
+        config_id = request.query_params.get("config_id")
+        try:
+            auth_url, _ = ig.create_auth_url(redirect_uri, config_id=config_id)
+        except Exception as exc:
+            return HTMLResponse(
+                f"<h2>Instagram OAuth Setup Needed</h2><p>{html.escape(str(exc))}</p>",
+                status_code=400,
+            )
         return RedirectResponse(url=auth_url, status_code=302)
 
     @mcp.custom_route("/instagram/callback", methods=["GET"])

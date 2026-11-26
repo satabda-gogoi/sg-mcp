@@ -50,6 +50,7 @@ class Settings:
     youtube_redirect_uri: str
     meta_app_id: str
     meta_app_secret: str
+    meta_config_id: str
     instagram_access_token: str
     instagram_user_id: str
     instagram_auth_mode: str
@@ -84,6 +85,7 @@ class Settings:
             youtube_redirect_uri=os.getenv("YOUTUBE_REDIRECT_URI", "").strip(),
             meta_app_id=os.getenv("META_APP_ID", "").strip(),
             meta_app_secret=os.getenv("META_APP_SECRET", "").strip(),
+            meta_config_id=os.getenv("META_CONFIG_ID", "").strip(),
             instagram_access_token=os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip(),
             instagram_user_id=os.getenv("INSTAGRAM_USER_ID", "").strip(),
             instagram_auth_mode=(

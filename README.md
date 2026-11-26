@@ -53,24 +53,27 @@ A cloud-ready **Model Context Protocol (MCP)** server built with **FastMCP 4 (`s
 
 ## Meta / Instagram Setup (App ID `META_APP_ID`)
 
-Meta's official Graph API **does not use an API key or your Instagram password** — it uses **App ID + App Secret + an OAuth Access Token**:
+Meta's official Graph API **does not use an API key or your Instagram password** — it uses **App ID + App Secret + an OAuth Access Token**.
 
-1. **Link Instagram to a Facebook Page** *(required for `INSTAGRAM_AUTH_MODE=facebook`)*:
-   - Ensure your Instagram account is a **Professional (Creator or Business)** account and is linked to a **Facebook Page** you administer.
-   - *(Alternatively, add the **Instagram → API setup with Instagram login** product in Meta for Developers and set `INSTAGRAM_AUTH_MODE=instagram`, which does not require a Facebook Page.)*
-2. **In [Meta for Developers](https://developers.facebook.com) → Your App:**
-   - **Use cases / Permissions**: Add `instagram_basic`, `instagram_content_publish`, `instagram_manage_comments`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement`.
-   - **Facebook Login → Settings → Valid OAuth Redirect URIs**: Add:
-     - `http://localhost:8080/instagram/callback`
+### Recommended: Instagram API with Unified Login (`INSTAGRAM_AUTH_MODE=unified`)
+1. **In [Meta for Developers](https://developers.facebook.com) → Your App:**
+   - Make sure your app is owned by a **Meta Business Portfolio** and has the **"Manage messaging & content on Instagram"** use case added.
+   - Go to **Use cases → Manage messaging & content on Instagram → API setup with Unified login** and create/open your **Facebook Login for Business Configuration**.
+   - Select the permissions (`instagram_basic`, `instagram_content_publish`, `instagram_manage_comments`, `instagram_manage_insights`, `business_management`) and copy the **Configuration ID (`META_CONFIG_ID`)**.
+   - Under **App settings → Basic**, add `sg-mcp.onrender.com` to **App Domains** and add Website platform Site URL `https://sg-mcp.onrender.com/`.
+   - Under **Facebook Login for Business → Settings → Valid OAuth Redirect URIs**, add:
      - `https://<your-render-service>.onrender.com/instagram/callback`
-   - **App Roles**: Add your Facebook account as Admin/Developer while the app is in Development mode.
-3. **Set Env Vars** in `.env` (and Render Dashboard → Environment):
+     - `http://localhost:8080/instagram/callback`
+2. **Set Env Vars** in Render Dashboard → Environment (and `.env`):
    - `META_APP_ID`
    - `META_APP_SECRET`
-   - `INSTAGRAM_AUTH_MODE=facebook` (or `instagram`)
-4. **Authorize Once**:
-   - Visit `http://localhost:8080/instagram/auth` (or `https://<your-render-service>.onrender.com/instagram/auth`), approve all permissions and select your Facebook Page + Instagram account.
+   - `META_CONFIG_ID`
+   - `INSTAGRAM_AUTH_MODE=unified`
+3. **Authorize Once**:
+   - Visit `https://<your-render-service>.onrender.com/instagram/auth`, sign in with Instagram or Facebook, select `@stupidlysimpleone`, and approve permissions.
    - Copy the displayed `INSTAGRAM_USER_ID` and `INSTAGRAM_ACCESS_TOKEN` into Render's Environment Variables (and `.env`).
+
+*(Legacy `INSTAGRAM_AUTH_MODE=facebook` with a linked Facebook Page, and `INSTAGRAM_AUTH_MODE=instagram`, are also supported.)*
 
 ---
 
